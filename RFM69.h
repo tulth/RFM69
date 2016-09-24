@@ -53,6 +53,9 @@
   #define RF69_IRQ_NUM          0  
 #endif
 
+#define RF69_IRQ_PIN          2
+#define RF69_IRQ_NUM          2  
+
 
 #define CSMA_LIMIT              -90 // upper RX signal sensitivity threshold in dBm for carrier sense access
 #define RF69_MODE_SLEEP         0 // XTAL OFF

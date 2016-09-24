@@ -88,6 +88,7 @@ bool RFM69::initialize(uint8_t freqBand, uint8_t nodeID, uint8_t networkID)
     {255, 0}
   };
 
+  delay(50);
   digitalWrite(_slaveSelectPin, HIGH);
   pinMode(_slaveSelectPin, OUTPUT);
   SPI.begin();
@@ -100,6 +101,7 @@ bool RFM69::initialize(uint8_t freqBand, uint8_t nodeID, uint8_t networkID)
   for (uint8_t i = 0; CONFIG[i][0] != 255; i++)
     writeReg(CONFIG[i][0], CONFIG[i][1]);
 
+  rcCalibration();
   // Encryption is persistent between resets and can trip you up during debugging.
   // Disable it during initialization so we always start from a known state.
   encrypt(0);
@@ -221,7 +223,13 @@ void RFM69::send(uint8_t toAddress, const void* buffer, uint8_t bufferSize, bool
 {
   writeReg(REG_PACKETCONFIG2, (readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART); // avoid RX deadlocks
   uint32_t now = millis();
-  while (!canSend() && millis() - now < RF69_CSMA_LIMIT_MS) receiveDone();
+  while (!canSend()) {
+    receiveDone();
+    if (!(millis() - now < RF69_CSMA_LIMIT_MS)) {
+      Serial.println("timeout: millis() - now < RF69_CSMA_LIMIT_MS");
+      break;
+    }
+  }
   sendFrame(toAddress, buffer, bufferSize, requestACK, false);
 }
 
@@ -304,9 +312,21 @@ void RFM69::sendFrame(uint8_t toAddress, const void* buffer, uint8_t bufferSize,
 
   // no need to wait for transmit mode to be ready since its handled by the radio
   setMode(RF69_MODE_TX);
+  uint32_t pllStart = millis();
+  while ((readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_PLLLOCK) == 0x00) { // wait for packetsent
+    if (!(millis() - pllStart < RF69_TX_LIMIT_MS)) {
+      Serial.println("timeout: millis() - pllStart < RF69_TX_LIMIT_MS");
+      setMode(RF69_MODE_STANDBY);
+      return;
+    }
+  }
   uint32_t txStart = millis();
-  while (digitalRead(_interruptPin) == 0 && millis() - txStart < RF69_TX_LIMIT_MS); // wait for DIO0 to turn HIGH signalling transmission finish
-  //while (readReg(REG_IRQFLAGS2) & RF_IRQFLAGS2_PACKETSENT == 0x00); // wait for ModeReady
+  while ((readReg(REG_IRQFLAGS2) & RF_IRQFLAGS2_PACKETSENT) == 0x00) { // wait for packetsent
+    if (!(millis() - txStart < RF69_TX_LIMIT_MS)) {
+      Serial.println("timeout: millis() - txStart < RF69_TX_LIMIT_MS");
+      break;
+    }
+  }
   setMode(RF69_MODE_STANDBY);
 }
 
@@ -563,15 +583,15 @@ void RFM69::readAllRegs()
             
             SerialPrint("\nTransceiver's operating modes:\nMode : ");
             capVal = (regVal >> 2) & 0x7;
-            if ( capVal == 0b000 ) {
+            if ( capVal == 0 ) {
                 SerialPrint ( "000 -> Sleep mode (SLEEP)\n" );
-            } else if ( capVal == 0b001 ) {
+            } else if ( capVal == 1 ) {
                 SerialPrint ( "001 -> Standby mode (STDBY)\n" );
-            } else if ( capVal == 0b010 ) {
+            } else if ( capVal == 2 ) {
                 SerialPrint ( "010 -> Frequency Synthesizer mode (FS)\n" );
-            } else if ( capVal == 0b011 ) {
+            } else if ( capVal == 3 ) {
                 SerialPrint ( "011 -> Transmitter mode (TX)\n" );
-            } else if ( capVal == 0b100 ) {
+            } else if ( capVal == 4 ) {
                 SerialPrint ( "100 -> Receiver Mode (RX)\n" );
             } else {
                 Serial.print( capVal, BIN );
@@ -585,26 +605,26 @@ void RFM69::readAllRegs()
         
             SerialPrint("Data Processing mode:\nDataMode : ");
             capVal = (regVal >> 5) & 0x3;
-            if ( capVal == 0b00 ) {
+            if ( capVal == 0 ) {
                 SerialPrint ( "00 -> Packet mode\n" );
-            } else if ( capVal == 0b01 ) {
+            } else if ( capVal == 1 ) {
                 SerialPrint ( "01 -> reserved\n" );
-            } else if ( capVal == 0b10 ) {
+            } else if ( capVal == 2 ) {
                 SerialPrint ( "10 -> Continuous mode with bit synchronizer\n" );
-            } else if ( capVal == 0b11 ) {
+            } else if ( capVal == 3 ) {
                 SerialPrint ( "11 -> Continuous mode without bit synchronizer\n" );
             }
             
             SerialPrint("\nModulation scheme:\nModulation Type : ");
             capVal = (regVal >> 3) & 0x3;
-            if ( capVal == 0b00 ) {
+            if ( capVal == 0 ) {
                 SerialPrint ( "00 -> FSK\n" );
                 modeFSK = 1;
-            } else if ( capVal == 0b01 ) {
+            } else if ( capVal == 1 ) {
                 SerialPrint ( "01 -> OOK\n" );
-            } else if ( capVal == 0b10 ) {
+            } else if ( capVal == 2 ) {
                 SerialPrint ( "10 -> reserved\n" );
-            } else if ( capVal == 0b11 ) {
+            } else if ( capVal == 3 ) {
                 SerialPrint ( "11 -> reserved\n" );
             }
             
@@ -617,23 +637,23 @@ void RFM69::readAllRegs()
             SerialPrint ("ModulationShaping : ");
             capVal = regVal & 0x3;
             if ( modeFSK ) {
-                if ( capVal == 0b00 ) {
+                if ( capVal == 0 ) {
                     SerialPrint ( "00 -> no shaping\n" );
-                } else if ( capVal == 0b01 ) {
+                } else if ( capVal == 1 ) {
                     SerialPrint ( "01 -> Gaussian filter, BT = 1.0\n" );
-                } else if ( capVal == 0b10 ) {
+                } else if ( capVal == 2 ) {
                     SerialPrint ( "10 -> Gaussian filter, BT = 0.5\n" );
-                } else if ( capVal == 0b11 ) {
+                } else if ( capVal == 3 ) {
                     SerialPrint ( "11 -> Gaussian filter, BT = 0.3\n" );
                 }
             } else {
-                if ( capVal == 0b00 ) {
+                if ( capVal == 0 ) {
                     SerialPrint ( "00 -> no shaping\n" );
-                } else if ( capVal == 0b01 ) {
+                } else if ( capVal == 1 ) {
                     SerialPrint ( "01 -> filtering with f(cutoff) = BR\n" );
-                } else if ( capVal == 0b10 ) {
+                } else if ( capVal == 2 ) {
                     SerialPrint ( "10 -> filtering with f(cutoff) = 2*BR\n" );
-                } else if ( capVal == 0b11 ) {
+                } else if ( capVal == 3 ) {
                     SerialPrint ( "ERROR - 11 is reserved\n" );
                 }
             }
@@ -723,25 +743,25 @@ void RFM69::readAllRegs()
             byte val;
             SerialPrint ( "Resolution of Listen mode Idle time (calibrated RC osc):\nListenResolIdle : " );
             val = regVal >> 6;
-            if ( val == 0b00 ) {
+            if ( val == 0 ) {
                 SerialPrint ( "00 -> reserved\n" );
-            } else if ( val == 0b01 ) {
+            } else if ( val == 1 ) {
                 SerialPrint ( "01 -> 64 us\n" );
-            } else if ( val == 0b10 ) {
+            } else if ( val == 2 ) {
                 SerialPrint ( "10 -> 4.1 ms\n" );
-            } else if ( val == 0b11 ) {
+            } else if ( val == 3 ) {
                 SerialPrint ( "11 -> 262 ms\n" );
             }
             
             SerialPrint ( "\nResolution of Listen mode Rx time (calibrated RC osc):\nListenResolRx : " );
             val = (regVal >> 4) & 0x3;
-            if ( val == 0b00 ) {
+            if ( val == 0 ) {
                 SerialPrint ( "00 -> reserved\n" );
-            } else if ( val == 0b01 ) {
+            } else if ( val == 1 ) {
                 SerialPrint ( "01 -> 64 us\n" );
-            } else if ( val == 0b10 ) {
+            } else if ( val == 2 ) {
                 SerialPrint ( "10 -> 4.1 ms\n" );
-            } else if ( val == 0b11 ) {
+            } else if ( val == 3 ) {
                 SerialPrint ( "11 -> 262 ms\n" );
             }
 
@@ -754,13 +774,13 @@ void RFM69::readAllRegs()
             
             SerialPrint ( "\nAction taken after acceptance of a packet in Listen mode:\nListenEnd : " );
             val = (regVal >> 1 ) & 0x3;
-            if ( val == 0b00 ) {
+            if ( val == 0 ) {
                 SerialPrint ( "00 -> chip stays in Rx mode. Listen mode stops and must be disabled (see section 4.3)\n" );
-            } else if ( val == 0b01 ) {
+            } else if ( val == 1 ) {
                 SerialPrint ( "01 -> chip stays in Rx mode until PayloadReady or Timeout interrupt occurs.  It then goes to the mode defined by Mode. Listen mode stops and must be disabled (see section 4.3)\n" );
-            } else if ( val == 0b10 ) {
+            } else if ( val == 2 ) {
                 SerialPrint ( "10 -> chip stays in Rx mode until PayloadReady or Timeout occurs.  Listen mode then resumes in Idle state.  FIFO content is lost at next Rx wakeup.\n" );
-            } else if ( val == 0b11 ) {
+            } else if ( val == 3 ) {
                 SerialPrint ( "11 -> Reserved\n" );
             }
             
@@ -781,14 +801,26 @@ uint8_t RFM69::readTemperature(uint8_t calFactor) // returns centigrade
 {
   setMode(RF69_MODE_STANDBY);
   writeReg(REG_TEMP1, RF_TEMP1_MEAS_START);
-  while ((readReg(REG_TEMP1) & RF_TEMP1_MEAS_RUNNING));
+  delay(10);
+  while ((readReg(REG_TEMP1) & RF_TEMP1_MEAS_RUNNING)) {
+    delay(10);
+  }
   return ~readReg(REG_TEMP2) + COURSE_TEMP_COEF + calFactor; // 'complement' corrects the slope, rising temp = rising val
 } // COURSE_TEMP_COEF puts reading in the ballpark, user can add additional correction
 
+#define RF69_CAL_LIMIT_MS 1000
 void RFM69::rcCalibration()
 {
+  Serial.println ("rcCalibration start" );
+  uint32_t calStart = millis();
   writeReg(REG_OSC1, RF_OSC1_RCCAL_START);
-  while ((readReg(REG_OSC1) & RF_OSC1_RCCAL_DONE) == 0x00);
+  while ((readReg(REG_OSC1) & RF_OSC1_RCCAL_DONE) == 0x00) {
+    if (!(millis() - calStart < RF69_CAL_LIMIT_MS)) {
+      Serial.println("timeout: millis() - calStart < RF69_CAL_LIMIT_MS");
+      break;
+    }
+  }
+  Serial.println ("rcCalibration done" );
 }
 
 inline void RFM69::maybeInterrupts()
